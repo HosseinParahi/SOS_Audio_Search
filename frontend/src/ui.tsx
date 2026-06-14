@@ -13,6 +13,10 @@ import {
 import { api, formatTime, type FileDetail } from './api'
 import { usePlayer } from './player'
 
+// Shared presentational pieces used across both views: source chips (boom/lav/camera),
+// pipeline status badges, safe search-snippet highlighting, copy/reveal buttons, and the
+// transcript drawer.
+
 // -- source chips -------------------------------------------------------------
 const SOURCE_META: Record<string, { icon: typeof Mic; label: string; cls: string }> = {
   boom: { icon: Mic, label: 'Boom', cls: 'text-amber border-amber/40 bg-amber/10' },
@@ -58,7 +62,11 @@ export function StatusBadge({ status }: { status: string }) {
   )
 }
 
-/** Render a snippet whose matched terms are wrapped in \x01…\x02 markers (no raw HTML). */
+/**
+ * Render a search snippet with matched terms highlighted. The backend marks hits with
+ * \x01…\x02 sentinel chars (see search._fts_search) instead of HTML, so we can build real
+ * <mark> elements here — transcript text is never injected as HTML, avoiding any XSS risk.
+ */
 export function Highlight({ snippet }: { snippet: string }) {
   const parts = snippet.split(/([\x01\x02])/)
   const out: ReactNode[] = []

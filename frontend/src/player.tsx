@@ -19,11 +19,15 @@ import {
 import { api, formatTime, mediaUrl } from './api'
 import { SourceChip } from './ui'
 
+// Global audio player. A single WaveSurfer instance lives in the persistent footer bar;
+// any component calls usePlayer().play(track) to load + play a file from a timestamp.
+// Exposed through React context so there's exactly one player for the whole app.
+
 export interface Track {
   fileId: number
   filename: string
   sourceKind?: string
-  startAt?: number
+  startAt?: number // seconds to start from (e.g. a search match's timestamp)
 }
 
 interface PlayerApi {
@@ -53,13 +57,17 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
   const [rate, setRate] = useState(1)
   const [loading, setLoading] = useState(false)
 
+  // Refs hold values the WaveSurfer event callbacks need to read *without* re-subscribing.
+  // The 'ready' handler is created once; reading volume/rate/seek from refs keeps it
+  // current without tearing down and rebuilding the player on every state change.
   const containerRef = useRef<HTMLDivElement>(null)
   const wsRef = useRef<WaveSurfer | null>(null)
-  const loadedId = useRef<number | null>(null)
-  const pendingSeek = useRef<number | null>(null)
+  const loadedId = useRef<number | null>(null)   // which file is currently loaded
+  const pendingSeek = useRef<number | null>(null) // seek to apply once 'ready' fires
   const volumeRef = useRef(1)
   const rateRef = useRef(1)
 
+  // Create the WaveSurfer instance once, wire its events to React state, destroy on unmount.
   useEffect(() => {
     if (!containerRef.current) return
     const ws = WaveSurfer.create({
@@ -79,6 +87,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     ws.on('finish', () => setPlaying(false))
     ws.on('timeupdate', (t) => setTime(t))
     ws.on('ready', (dur) => {
+      // Track is decoded: restore volume/rate, jump to the requested start, and play.
       setDuration(dur)
       setLoading(false)
       ws.setVolume(volumeRef.current)
@@ -101,18 +110,20 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     const ws = wsRef.current
     if (!ws) return
     setTrack(t)
+    // Same file already loaded: just seek + resume, skip the reload.
     if (loadedId.current === t.fileId) {
       if (t.startAt != null) ws.setTime(t.startAt)
       ws.play()
       return
     }
     loadedId.current = t.fileId
-    pendingSeek.current = t.startAt ?? null
+    pendingSeek.current = t.startAt ?? null // applied in the 'ready' handler above
     setLoading(true)
     setTime(0)
     setDuration(0)
     ;(async () => {
       try {
+        // Render instantly from precomputed peaks; audio still streams via /api/media.
         const pk = await api.peaks(t.fileId)
         await ws.load(mediaUrl(t.fileId), [pk.peaks], pk.duration)
       } catch {
@@ -129,6 +140,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     wsRef.current?.playPause()
   }, [])
 
+  // Jump forward/back by `delta` seconds, clamped to [0, duration].
   const skip = (delta: number) => {
     const ws = wsRef.current
     if (!ws) return
@@ -148,6 +160,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     wsRef.current?.setVolume(next ? 0 : volumeRef.current)
   }
 
+  // Step through the preset playback speeds on each click.
   const cycleRate = () => {
     const next = RATES[(RATES.indexOf(rate) + 1) % RATES.length]
     setRate(next)

@@ -1,3 +1,6 @@
+// Typed client for the backend API + shared response types + small formatters.
+// All UI data access goes through the `api` object below; nothing else calls fetch().
+
 export type MatchKind = 'exact' | 'semantic'
 
 export interface Match {
@@ -99,6 +102,7 @@ export const api = {
     }).then((r) => handle<T>(r)),
   delete: <T>(url: string) => fetch(url, { method: 'DELETE' }).then((r) => handle<T>(r)),
 
+  // One named method per endpoint — keeps URLs + response types in a single place.
   search: (q: string) =>
     api.get<{ query: string; groups: Group[] }>(`/api/search?q=${encodeURIComponent(q)}`),
   stats: () => api.get<Stats>('/api/stats'),
@@ -117,6 +121,7 @@ export function mediaUrl(id: number): string {
   return `/api/media/${id}`
 }
 
+// Seconds -> "m:ss" (or "h:mm:ss" past an hour); used for timecodes and durations.
 export function formatTime(t: number | null | undefined): string {
   if (t == null || !isFinite(t)) return '--:--'
   const s = Math.max(0, t)

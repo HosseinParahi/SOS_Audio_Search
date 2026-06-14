@@ -5,12 +5,18 @@ import { PlayerProvider } from './player'
 import LibraryView from './views/LibraryView'
 import SearchView from './views/SearchView'
 
+// App shell: a left icon rail switches between the two views; the player footer wraps
+// everything (PlayerProvider) so it persists across view changes. A lightweight stats
+// poll drives the "indexing" indicator on the rail.
+
 type View = 'search' | 'library'
 
 export default function App() {
   const [view, setView] = useState<View>('search')
   const [stats, setStats] = useState<Stats | null>(null)
 
+  // Poll stats every 5s for the rail's busy indicator. `alive` guards against a state
+  // update after unmount.
   useEffect(() => {
     let alive = true
     const tick = () => api.stats().then((s) => alive && setStats(s)).catch(() => {})

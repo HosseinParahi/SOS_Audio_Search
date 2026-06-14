@@ -1,4 +1,12 @@
-"""Hybrid search: FTS5 BM25 + sqlite-vec KNN -> reciprocal rank fusion -> take groups."""
+"""Hybrid search: FTS5 BM25 + sqlite-vec KNN -> reciprocal rank fusion -> take groups.
+
+Two independent retrievers run over the same transcripts:
+  - exact/keyword via FTS5 (catches precise lines the user remembers verbatim);
+  - semantic via vector KNN over ~30s windows (catches paraphrases / "what it was about").
+Their ranked lists are merged with Reciprocal Rank Fusion (RRF) — a score that depends
+only on *rank position*, so the two incomparable scales (BM25 vs cosine distance) combine
+cleanly. Files are then collapsed into take groups so duplicate takes show as one result.
+"""
 import re
 import sqlite3
 
@@ -6,9 +14,9 @@ import numpy as np
 
 from .embeddings import embed_query
 
-RRF_K = 60
-CANDIDATES = 60
-MAX_MATCHES_PER_FILE = 3
+RRF_K = 60          # RRF damping constant; larger = flatter contribution from top ranks
+CANDIDATES = 60     # how many hits to pull from each retriever before fusing
+MAX_MATCHES_PER_FILE = 3  # snippet rows shown per file in the result card
 
 
 def _fts_query(q: str) -> str:
@@ -21,7 +29,9 @@ def search(con: sqlite3.Connection, q: str, limit: int = 20) -> list[dict]:
     fts_hits = _fts_search(con, q)
     vec_hits = _vec_search(con, q)
 
-    # RRF over files; remember best matching regions per file
+    # Fuse both lists with RRF, accumulating per *file*. A hit at rank r contributes
+    # 1/(RRF_K + r); a file appearing in both lists naturally scores higher. While doing
+    # so, keep each file's best matching regions for the snippet display.
     scores: dict[int, float] = {}
     matches: dict[int, list[dict]] = {}
     for rank, hit in enumerate(fts_hits):
@@ -30,6 +40,7 @@ def search(con: sqlite3.Connection, q: str, limit: int = 20) -> list[dict]:
     for rank, hit in enumerate(vec_hits):
         scores[hit["file_id"]] = scores.get(hit["file_id"], 0) + 1 / (RRF_K + rank + 1)
         bucket = matches.setdefault(hit["file_id"], [])
+        # skip a semantic hit that covers the same moment an exact hit already does
         if not any(_overlaps(hit, m) for m in bucket):
             bucket.append(hit)
 
@@ -39,7 +50,8 @@ def search(con: sqlite3.Connection, q: str, limit: int = 20) -> list[dict]:
     ranked_files = sorted(scores, key=lambda f: scores[f], reverse=True)
     file_rows = _fetch_files(con, ranked_files)
 
-    # collapse to take groups, best file first
+    # Collapse files into take groups (boom/lav/camera of one take -> one card). The group
+    # inherits the score of its best-ranked member, so group order follows file order.
     groups: dict[int, dict] = {}
     for fid in ranked_files:
         row = file_rows.get(fid)
@@ -50,12 +62,15 @@ def search(con: sqlite3.Connection, q: str, limit: int = 20) -> list[dict]:
         entry["files"].append(_file_payload(row, matches.get(fid, [])))
 
     ordered = sorted(groups.values(), key=lambda g: g["score"], reverse=True)[:limit]
+    # Fill in the take's other recordings that didn't match the query on their own.
     for group in ordered:
         _attach_siblings(con, group, file_rows)
     return ordered
 
 
 def _fts_search(con: sqlite3.Connection, q: str) -> list[dict]:
+    """Keyword search ranked by BM25. highlight() wraps matched terms in char(1)/char(2)
+    sentinel bytes — the frontend turns those into <mark> safely, no HTML is sent."""
     match = _fts_query(q)
     if not match:
         return []
@@ -74,6 +89,7 @@ def _fts_search(con: sqlite3.Connection, q: str) -> list[dict]:
 
 
 def _vec_search(con: sqlite3.Connection, q: str) -> list[dict]:
+    """Semantic search: embed the query, then KNN over the per-window embeddings."""
     vec = embed_query(q).astype(np.float32)
     rows = con.execute(
         """SELECT window_id, distance FROM vec_windows
@@ -92,10 +108,12 @@ def _vec_search(con: sqlite3.Connection, q: str) -> list[dict]:
 
 
 def _overlaps(a: dict, b: dict) -> bool:
+    """True if two [start,end] time spans intersect (used to dedupe match snippets)."""
     return a["start"] < b["end"] and b["start"] < a["end"]
 
 
 def _fetch_files(con: sqlite3.Connection, ids: list[int]) -> dict[int, sqlite3.Row]:
+    """Batch-load file rows by id into a dict (one query instead of N)."""
     qmarks = ",".join("?" * len(ids))
     rows = con.execute(f"SELECT * FROM files WHERE id IN ({qmarks})", ids).fetchall()
     return {r["id"]: r for r in rows}

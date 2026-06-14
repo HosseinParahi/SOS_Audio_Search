@@ -1,4 +1,10 @@
-"""Original-file range streaming + on-demand m4a proxy for non-web-safe sources."""
+"""Original-file range streaming + on-demand m4a proxy for non-web-safe sources.
+
+Browsers can play mp3/aac/flac/etc. and simple stereo WAV directly, so we stream those
+originals as-is (with HTTP range support for instant seeking). Sources a browser can't
+play — video containers, multi-channel/high-bit-depth WAVs — get transcoded once to a
+cached stereo m4a "proxy"; the original on disk is never touched.
+"""
 import subprocess
 import threading
 from pathlib import Path
@@ -10,6 +16,7 @@ from .config import PROXY_DIR
 
 CHUNK = 256 * 1024
 WEB_SAFE_CODECS = {"mp3", "aac", "flac", "vorbis", "opus"}
+# Per-file locks so two concurrent requests don't transcode the same proxy twice.
 _locks: dict[int, threading.Lock] = {}
 _locks_guard = threading.Lock()
 
@@ -20,10 +27,13 @@ MIME = {".wav": "audio/wav", ".bwf": "audio/wav", ".mp3": "audio/mpeg",
 
 
 def is_web_safe(row) -> bool:
+    """Can a browser <audio> element play this file's bytes directly?"""
     if row["has_video"]:
         return False  # stream extracted audio proxy, not the whole video
+    # Mono/stereo 16- or 24-bit PCM in a WAV container plays natively.
     if (row["codec"] or "").startswith("pcm_s16") or (row["codec"] or "").startswith("pcm_s24"):
         return (row["channels"] or 0) <= 2 and Path(row["path"]).suffix.lower() in (".wav", ".bwf")
+    # Otherwise only known browser codecs, and only if not multi-channel.
     return (row["codec"] or "") in WEB_SAFE_CODECS and (row["channels"] or 0) <= 2
 
 
@@ -33,6 +43,7 @@ def playable_path(row) -> tuple[Path, str]:
     if is_web_safe(row):
         return src, MIME.get(src.suffix.lower(), "application/octet-stream")
 
+    # Double-checked locking: build the proxy once, reuse forever after.
     proxy = PROXY_DIR / f"{row['id']}.m4a"
     if not proxy.exists():
         with _locks_guard:
@@ -44,6 +55,8 @@ def playable_path(row) -> tuple[Path, str]:
 
 
 def _transcode(src: Path, dst: Path) -> None:
+    # Write to a temp file then atomically rename, so a crashed/partial transcode never
+    # leaves a half-written proxy that looks complete. +faststart enables streaming.
     tmp = dst.with_suffix(".tmp.m4a")
     out = subprocess.run(
         ["ffmpeg", "-y", "-v", "error", "-i", str(src), "-vn",
@@ -57,6 +70,8 @@ def _transcode(src: Path, dst: Path) -> None:
 
 
 def range_stream(request: Request, path: Path, mime: str) -> StreamingResponse:
+    """Serve a file with HTTP Range support so the player can seek without downloading
+    the whole thing. No Range header -> 200 full body; valid Range -> 206 partial."""
     if not path.exists():
         raise HTTPException(404, "media file missing on disk")
     size = path.stat().st_size
@@ -65,6 +80,9 @@ def range_stream(request: Request, path: Path, mime: str) -> StreamingResponse:
     status = 200
     if range_header:
         try:
+            # Parse "bytes=START-END". Either side may be empty:
+            #   "bytes=500-"   -> from 500 to end
+            #   "bytes=-500"   -> the last 500 bytes (suffix range)
             unit, _, rng = range_header.partition("=")
             lo, _, hi = rng.partition("-")
             if unit.strip() != "bytes":
@@ -78,6 +96,7 @@ def range_stream(request: Request, path: Path, mime: str) -> StreamingResponse:
             raise HTTPException(416, "invalid range")
 
     def reader():
+        # Stream the requested byte window in chunks instead of loading it all into memory.
         with open(path, "rb") as f:
             f.seek(start)
             remaining = end - start + 1

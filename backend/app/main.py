@@ -1,3 +1,10 @@
+"""FastAPI application: all HTTP routes + the static frontend mount.
+
+This is the only network-facing module. It stays thin: each route opens a short-lived
+SQLite connection (closed in `finally`), and anything CPU/GPU-heavy (search, transcode,
+peaks) is pushed to a thread pool so the async event loop never blocks. The background
+ingest pipeline lives in `pipeline.py`; routes here just enqueue work and read results.
+"""
 import asyncio
 import json
 import logging
@@ -16,11 +23,14 @@ from .pipeline import pipeline
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
 
+# The built frontend (only exists after `npm run build`); mounted at the end if present.
 FRONTEND_DIST = Path(__file__).resolve().parent.parent.parent / "frontend" / "dist"
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Runs once at startup: ensure schema exists, then boot the ingest worker + requeue
+    # anything left mid-process from a previous run.
     db.init_db()
     await pipeline.start()
     yield
@@ -34,6 +44,8 @@ class FolderIn(BaseModel):
 
 
 # -- folders ----------------------------------------------------------------
+# Add/list/remove the root folders the user wants indexed. Adding a folder (or rescanning)
+# kicks off a background scan; the response returns immediately while work continues.
 @app.post("/api/folders")
 async def add_folder(body: FolderIn):
     p = Path(body.path).expanduser()
@@ -69,6 +81,7 @@ async def list_folders():
 
 @app.delete("/api/folders/{folder_id}")
 async def remove_folder(folder_id: int):
+    # Drops the folder and its index rows only — the user's files on disk are untouched.
     con = db.connect()
     try:
         for f in con.execute("SELECT id FROM files WHERE folder_id=?", (folder_id,)):
@@ -94,6 +107,8 @@ async def rescan():
 
 
 # -- files -------------------------------------------------------------------
+# Library listing, aggregate stats (drives the dashboard + progress dot), per-file
+# transcript detail, retry of a failed file, and "reveal in Finder".
 @app.get("/api/files")
 async def list_files():
     con = db.connect()
@@ -161,6 +176,7 @@ async def reveal_file(file_id: int):
         con.close()
     if not row:
         raise HTTPException(404)
+    # macOS `open -R` selects the file in Finder so the user can drag it into their NLE.
     subprocess.run(["open", "-R", row["path"]], check=False)
     return {"ok": True}
 
@@ -172,6 +188,8 @@ async def search_endpoint(q: str = ""):
     if not q:
         return {"query": q, "groups": []}
 
+    # search.search() runs FTS + a vector KNN + embedding the query — all blocking,
+    # so run it off the event loop in a worker thread.
     def run():
         con = db.connect()
         try:
@@ -184,6 +202,8 @@ async def search_endpoint(q: str = ""):
 
 
 # -- media ---------------------------------------------------------------------
+# Audio streaming (with HTTP range support) + waveform peaks. playable_path() may run a
+# blocking ffmpeg transcode, and peaks decode the whole file, so both go to a thread pool.
 def _file_row(file_id: int):
     con = db.connect()
     try:
@@ -211,6 +231,8 @@ async def media_peaks(file_id: int):
 
 
 # -- events (SSE) ----------------------------------------------------------------
+# Server-Sent Events stream: the frontend subscribes once and receives live pipeline
+# updates (file status changes, scan start/done) so the Library UI updates without polling.
 @app.get("/api/events")
 async def events(request: Request):
     q = pipeline.subscribe()
@@ -222,6 +244,8 @@ async def events(request: Request):
                 if await request.is_disconnected():
                     break
                 try:
+                    # Block up to 15s for an event; on timeout send a comment line to keep
+                    # the connection (and any proxies) alive.
                     event = await asyncio.wait_for(q.get(), timeout=15)
                     yield f"data: {json.dumps(event)}\n\n"
                 except asyncio.TimeoutError:
@@ -234,5 +258,7 @@ async def events(request: Request):
                                       "X-Accel-Buffering": "no"})
 
 
+# Serve the built SPA at the root (must be mounted last so it doesn't shadow /api routes).
+# Absent in dev — there Vite serves the UI on :5173 and proxies /api here.
 if FRONTEND_DIST.exists():
     app.mount("/", StaticFiles(directory=FRONTEND_DIST, html=True), name="frontend")

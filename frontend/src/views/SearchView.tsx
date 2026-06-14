@@ -13,6 +13,10 @@ import { api, formatTime, type FileHit, type Group } from '../api'
 import { usePlayer } from '../player'
 import { CopyPathButton, Highlight, KindTag, RevealButton, SourceChip, TranscriptDrawer } from '../ui'
 
+// Search page: a debounced live search box and a list of take-group cards. Each card is
+// one take; its primary (best-matching) recording is shown, with sibling sources
+// (boom/lav/camera) collapsed behind a toggle.
+
 export default function SearchView() {
   const [q, setQ] = useState('')
   const [groups, setGroups] = useState<Group[] | null>(null)
@@ -23,6 +27,8 @@ export default function SearchView() {
   const seq = useRef(0)
 
   const runSearch = useCallback(async (query: string) => {
+    // `seq` guards against out-of-order responses: only the latest request applies its
+    // result (a slow earlier query can't overwrite a newer one).
     const mine = ++seq.current
     if (!query.trim()) {
       setGroups(null)
@@ -41,7 +47,7 @@ export default function SearchView() {
     }
   }, [])
 
-  // debounced live search
+  // Debounce: search 350ms after the user stops typing, so we don't fire on every keystroke.
   useEffect(() => {
     const t = setTimeout(() => runSearch(q), 350)
     return () => clearTimeout(t)
@@ -142,6 +148,7 @@ export default function SearchView() {
   )
 }
 
+// One take = one card. `delay` staggers the entrance animation down the list.
 function GroupCard({
   group,
   delay,
@@ -152,8 +159,8 @@ function GroupCard({
   onTranscript: (id: number) => void
 }) {
   const [expanded, setExpanded] = useState(false)
-  const primary = group.files[0]
-  const siblings = group.files.slice(1)
+  const primary = group.files[0]      // best-matching recording, shown by default
+  const siblings = group.files.slice(1) // other mics/cards of the same take
 
   return (
     <article
@@ -193,6 +200,7 @@ function GroupCard({
   )
 }
 
+// One recording within a take: play button, source chip, match snippets, and actions.
 function FileRow({
   file,
   onTranscript,
@@ -203,7 +211,7 @@ function FileRow({
   primary?: boolean
 }) {
   const { play } = usePlayer()
-  const startAt = file.matches[0]?.start
+  const startAt = file.matches[0]?.start // play from the first match by default
 
   return (
     <div className={`px-4 py-3 ${primary ? '' : 'border-t border-line/40 bg-panel2/40'}`}>

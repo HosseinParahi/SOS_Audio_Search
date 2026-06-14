@@ -1,3 +1,14 @@
+"""SQLite schema, connection factory, and index-cleanup helper.
+
+Everything lives in one SQLite file: relational metadata, FTS5 full-text index, and
+sqlite-vec vector tables. The schema has three kinds of tables:
+  - plain tables: `folders`, `files`, `segments` (transcript lines), `windows` (~30s text
+    chunks that get embedded);
+  - `segments_fts`: an FTS5 mirror of `segments.text` kept in sync by triggers, for fast
+    exact/keyword (BM25) search;
+  - `vec_windows` / `vec_files`: sqlite-vec virtual tables holding embeddings, for
+    semantic KNN search (per-window) and take grouping (per-file whole-transcript vector).
+"""
 import sqlite3
 
 import sqlite_vec
@@ -78,12 +89,14 @@ CREATE VIRTUAL TABLE IF NOT EXISTS vec_files USING vec0(
 
 
 def connect() -> sqlite3.Connection:
+    """Open a connection with rows as dicts, WAL (concurrent reads while writing),
+    foreign keys on (so cascades work), and the sqlite-vec extension loaded."""
     con = sqlite3.connect(DB_PATH, timeout=30)
     con.row_factory = sqlite3.Row
     con.execute("PRAGMA journal_mode=WAL")
     con.execute("PRAGMA foreign_keys=ON")
     con.enable_load_extension(True)
-    sqlite_vec.load(con)
+    sqlite_vec.load(con)  # registers vec0 virtual-table + distance functions
     con.enable_load_extension(False)
     return con
 
@@ -98,7 +111,11 @@ def init_db() -> None:
 
 
 def delete_file_index(con: sqlite3.Connection, file_id: int) -> None:
-    """Remove derived data for a file (segments/windows/vectors), keep the file row."""
+    """Remove derived data for a file (segments/windows/vectors), keep the file row.
+
+    Used before reprocessing so re-runs are idempotent. Vector rows go first (they have no
+    cascade); deleting `segments` also clears `segments_fts` via the AFTER DELETE trigger.
+    """
     con.execute(
         "DELETE FROM vec_windows WHERE window_id IN (SELECT id FROM windows WHERE file_id=?)",
         (file_id,),

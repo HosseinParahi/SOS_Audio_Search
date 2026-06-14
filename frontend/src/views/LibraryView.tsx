@@ -22,6 +22,9 @@ import {
 import { usePlayer } from '../player'
 import { CopyPathButton, RevealButton, SourceChip, StatusBadge, TranscriptDrawer } from '../ui'
 
+// Library page: add/remove folders, see indexing stats, and a live file table. Status
+// updates arrive over Server-Sent Events so badges change in real time without polling.
+
 export default function LibraryView() {
   const [folders, setFolders] = useState<Folder[]>([])
   const [files, setFiles] = useState<LibFile[]>([])
@@ -31,8 +34,11 @@ export default function LibraryView() {
   const [addError, setAddError] = useState<string | null>(null)
   const [drawerFile, setDrawerFile] = useState<number | null>(null)
   const { play } = usePlayer()
+  // Ids we've already rendered — lets the SSE handler tell a status change (patch in place)
+  // from a newly discovered file (needs a full refresh to appear in the table).
   const knownIds = useRef<Set<number>>(new Set())
 
+  // Full reload of folders + files + stats (on mount, after add/remove, and on scan events).
   const refresh = useCallback(async () => {
     const [fo, fi, st] = await Promise.all([api.folders(), api.files(), api.stats()])
     setFolders(fo)
@@ -45,7 +51,8 @@ export default function LibraryView() {
     refresh()
   }, [refresh])
 
-  // live pipeline events
+  // Subscribe to live pipeline events. Known file -> patch its row in place (cheap);
+  // unknown file or a scan event -> full refresh. Connection closes on unmount.
   useEffect(() => {
     const es = new EventSource('/api/events')
     es.onmessage = (msg) => {
@@ -60,7 +67,7 @@ export default function LibraryView() {
             f.id === ev.id ? { ...f, status: ev.status ?? f.status, error: ev.error ?? null } : f,
           ),
         )
-        api.stats().then(setStats).catch(() => {})
+        api.stats().then(setStats).catch(() => {}) // keep the counters in sync
       } else if (ev.type === 'scan') {
         refresh()
       }
