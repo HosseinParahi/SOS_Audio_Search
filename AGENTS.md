@@ -46,6 +46,48 @@ cd frontend && npm run dev                             # UI hot reload, port 517
 
 First indexing run downloads models (~1.6 GB Whisper + ~130 MB embedder), once.
 
+## macOS desktop app (Tauri) — `src-tauri/`
+
+The same app ships as a self-contained native `.app` (Apple Silicon only). The Tauri (Rust)
+shell renders the **unchanged** React UI in a native window and launches the **unchanged**
+Python FastAPI backend as a child process on a free localhost port — no second implementation.
+The web build (`./start.sh`) and the native app share all frontend/backend code; the only
+runtime difference is the API base URL, injected by Rust as `window.__AUDIO_SEARCH_API__`
+(see [api.ts](frontend/src/api.ts) `apiUrl`/`isNative`; default `''` = same-origin webapp).
+
+| Piece | Where |
+|-------|-------|
+| Rust glue (port pick, spawn backend, health-wait, inject API base, kill child on exit, native window) | [src-tauri/src/lib.rs](src-tauri/src/lib.rs) |
+| App config (identifier `com.audiosearch.desktop`, `bundle.resources`, programmatic window) | [src-tauri/tauri.conf.json](src-tauri/tauri.conf.json) |
+| Native folder picker (`tauri-plugin-dialog`) | [LibraryView.tsx](frontend/src/views/LibraryView.tsx) + `capabilities/default.json` |
+
+**Bundled resources** (under `src-tauri/resources/`, gitignored — only `.gitkeep`
+placeholders are tracked) are built by two scripts before `tauri build`:
+
+```bash
+src-tauri/scripts/build-pyenv.sh     # relocatable standalone CPython 3.12 + all deps + backend/app
+src-tauri/scripts/bundle-ffmpeg.sh   # ffmpeg+ffprobe + their dylibs (dylibbundler), self-contained
+cd src-tauri && cargo build          # dev iterate (uses `uv run` backend, not the pyenv)
+../frontend/node_modules/.bin/tauri build --bundles app dmg   # → target/release/bundle/{macos,dmg}
+```
+
+Dev mode (`cargo`/`tauri dev`, `debug_assertions`) runs the backend via `uv run` from
+`backend/`; the bundled release runs the **embedded** `resources/pyenv/bin/python3.12` against
+`resources/backend/app`, with `resources/bin` prepended to `PATH` for ffmpeg.
+
+Native-app gotchas:
+- **Run the two resource scripts before `tauri build`** — `build.rs` validates the resource
+  paths exist (even for `cargo build`/`tauri dev`; the `.gitkeep` placeholders satisfy that on a
+  fresh clone). `dylibbundler` is required (`brew install dylibbundler`).
+- **Writable data moves out of the read-only bundle.** Rust sets `AUDIO_SEARCH_DATA` and
+  `HF_HOME` to `~/Library/Application Support/com.audiosearch.desktop/` ([config.py](backend/app/config.py)
+  honors `AUDIO_SEARCH_DATA`); `backend/data/` is only used by the webapp.
+- **CORS:** the webview origin differs from the backend port, so [main.py](backend/app/main.py)
+  adds a permissive `CORSMiddleware` (safe — the server only binds loopback).
+- **Unsigned + arm64-only.** The `.app`/`.dmg` are not code-signed; recipients must right-click
+  → Open once (or `xattr -dr com.apple.quarantine "Audio Search.app"`). Upgradeable to Developer
+  ID signing + notarization later without architecture changes.
+
 ## Architecture map
 
 ### Backend — `backend/app/` (FastAPI, single SQLite DB)
@@ -96,6 +138,32 @@ curl -s localhost:8000/api/stats                 # smoke test a running server
 ```
 
 Reset all indexed state: stop the server, delete `backend/data/`.
+
+## Contributing
+
+Public, MIT-licensed repo — see **[CONTRIBUTING.md](CONTRIBUTING.md)** for the human-facing
+setup/conventions/PR guide. This file (AGENTS.md) stays the technical source of truth; keep the two
+in sync when conventions change. Conventional Commits, small focused PRs, run the "Verify a change"
+checks before submitting.
+
+## Releasing
+
+One GitHub release per version offers **both** ways to run: the native `.dmg` as a download, and
+the webapp via clone + `./start.sh` (GitHub auto-attaches the source archives). Logo/icons are
+generated from [assets/logo.svg](assets/logo.svg) via `tauri icon` and compiled into the bundle, so
+regenerate icons **before** building the release `.app`.
+
+```bash
+# 1. (if the logo changed) regenerate icons, then
+src-tauri/scripts/build-pyenv.sh && src-tauri/scripts/bundle-ffmpeg.sh
+./frontend/node_modules/.bin/tauri build --bundles app dmg     # → target/release/bundle/dmg/*.dmg
+# 2. tag + publish
+git tag vX.Y.Z && git push origin vX.Y.Z
+gh release create vX.Y.Z "…/AudioSearch-X.Y.Z-arm64.dmg" --title "…" --notes-file notes.md
+```
+
+Release notes must include the **unsigned-app first-launch step** (right-click → Open, or
+`xattr -dr com.apple.quarantine …`), the Apple-Silicon-only note, and the `.dmg` `shasum -a 256`.
 
 ## Gotchas
 
