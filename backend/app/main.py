@@ -13,6 +13,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -37,6 +38,17 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Audio Search", lifespan=lifespan)
+
+# The native macOS shell renders the UI from a different origin (tauri://localhost, or the
+# Vite dev server) than the backend's 127.0.0.1:<port>, so the browser enforces CORS on the
+# UI's fetch/EventSource/peaks calls. The server only ever binds to loopback, so allowing any
+# origin here is safe and keeps the same-origin webapp working unchanged.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 class FolderIn(BaseModel):

@@ -10,10 +10,13 @@ import {
   Trash2,
   TriangleAlert,
 } from 'lucide-react'
+import { open } from '@tauri-apps/plugin-dialog'
 import {
   api,
+  apiUrl,
   formatDuration,
   formatTime,
+  isNative,
   type Folder,
   type LibFile,
   type PipelineEvent,
@@ -54,7 +57,7 @@ export default function LibraryView() {
   // Subscribe to live pipeline events. Known file -> patch its row in place (cheap);
   // unknown file or a scan event -> full refresh. Connection closes on unmount.
   useEffect(() => {
-    const es = new EventSource('/api/events')
+    const es = new EventSource(apiUrl('/api/events'))
     es.onmessage = (msg) => {
       const ev: PipelineEvent = JSON.parse(msg.data)
       if (ev.type === 'file' && ev.id != null) {
@@ -75,12 +78,13 @@ export default function LibraryView() {
     return () => es.close()
   }, [refresh])
 
-  const addFolder = async () => {
-    if (!newPath.trim()) return
+  const addFolder = async (explicit?: string) => {
+    const path = (explicit ?? newPath).trim()
+    if (!path) return
     setAdding(true)
     setAddError(null)
     try {
-      await api.addFolder(newPath.trim())
+      await api.addFolder(path)
       setNewPath('')
       await refresh()
     } catch (e) {
@@ -88,6 +92,12 @@ export default function LibraryView() {
     } finally {
       setAdding(false)
     }
+  }
+
+  // Native shell: open a real macOS folder picker; browser: fall back to the text input.
+  const pickFolder = async () => {
+    const selected = await open({ directory: true, multiple: false, title: 'Choose an audio folder' })
+    if (typeof selected === 'string') await addFolder(selected)
   }
 
   const removeFolder = async (id: number) => {
@@ -141,17 +151,21 @@ export default function LibraryView() {
       {/* folders */}
       <section className="mt-8">
         <div className="flex items-center gap-2">
-          <input
-            value={newPath}
-            onChange={(e) => setNewPath(e.target.value)}
-            onKeyDown={(e) => e.key === 'Enter' && addFolder()}
-            placeholder="/path/to/your/audio/folder"
-            className="tc flex-1 rounded-lg border border-line bg-panel2 px-3.5 py-2.5 text-[13px] text-fg outline-none transition placeholder:text-faint focus:border-amber/50"
-          />
+          {!isNative() && (
+            <input
+              value={newPath}
+              onChange={(e) => setNewPath(e.target.value)}
+              onKeyDown={(e) => e.key === 'Enter' && addFolder()}
+              placeholder="/path/to/your/audio/folder"
+              className="tc flex-1 rounded-lg border border-line bg-panel2 px-3.5 py-2.5 text-[13px] text-fg outline-none transition placeholder:text-faint focus:border-amber/50"
+            />
+          )}
           <button
-            onClick={addFolder}
-            disabled={adding || !newPath.trim()}
-            className="flex items-center gap-2 rounded-lg bg-amber px-4 py-2.5 text-[13px] font-semibold text-ink transition hover:bg-amber-soft disabled:opacity-40"
+            onClick={() => (isNative() ? pickFolder() : addFolder())}
+            disabled={adding || (!isNative() && !newPath.trim())}
+            className={`flex items-center gap-2 rounded-lg bg-amber px-4 py-2.5 text-[13px] font-semibold text-ink transition hover:bg-amber-soft disabled:opacity-40${
+              isNative() ? ' flex-1 justify-center' : ''
+            }`}
           >
             {adding ? <Loader2 size={15} className="animate-spin" /> : <FolderPlus size={15} />}
             Add folder

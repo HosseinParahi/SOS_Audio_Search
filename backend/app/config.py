@@ -1,7 +1,11 @@
+import os
 from pathlib import Path
 
 BACKEND_DIR = Path(__file__).resolve().parent.parent
-DATA_DIR = BACKEND_DIR / "data"
+# Writable derived-data root. Defaults to backend/data for the webapp; the native
+# macOS app (read-only .app bundle) overrides this to Application Support via the
+# AUDIO_SEARCH_DATA env var so the DB + caches land somewhere writable.
+DATA_DIR = Path(os.environ.get("AUDIO_SEARCH_DATA") or (BACKEND_DIR / "data"))
 CACHE_DIR = DATA_DIR / "cache"
 PROXY_DIR = CACHE_DIR / "proxy"
 PEAKS_DIR = CACHE_DIR / "peaks"
