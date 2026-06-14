@@ -92,15 +92,32 @@ async function handle<T>(res: Response): Promise<T> {
   return res.json()
 }
 
+// In the webapp the UI is served same-origin, so relative `/api` works. The native
+// Tauri shell renders the UI from a different origin and runs the backend on a dynamic
+// localhost port; it injects that base as `window.__AUDIO_SEARCH_API__` before load.
+// Default '' keeps the webapp unchanged.
+const API_BASE: string =
+  (typeof window !== 'undefined' && (window as unknown as { __AUDIO_SEARCH_API__?: string }).__AUDIO_SEARCH_API__) || ''
+
+// Prefix a relative `/api/...` path with the backend base (no-op in the webapp).
+export function apiUrl(path: string): string {
+  return `${API_BASE}${path}`
+}
+
+// True when running inside the native Tauri shell (vs. the browser webapp).
+export function isNative(): boolean {
+  return API_BASE !== ''
+}
+
 export const api = {
-  get: <T>(url: string) => fetch(url).then((r) => handle<T>(r)),
+  get: <T>(url: string) => fetch(apiUrl(url)).then((r) => handle<T>(r)),
   post: <T>(url: string, body?: unknown) =>
-    fetch(url, {
+    fetch(apiUrl(url), {
       method: 'POST',
       headers: body ? { 'Content-Type': 'application/json' } : undefined,
       body: body ? JSON.stringify(body) : undefined,
     }).then((r) => handle<T>(r)),
-  delete: <T>(url: string) => fetch(url, { method: 'DELETE' }).then((r) => handle<T>(r)),
+  delete: <T>(url: string) => fetch(apiUrl(url), { method: 'DELETE' }).then((r) => handle<T>(r)),
 
   // One named method per endpoint — keeps URLs + response types in a single place.
   search: (q: string) =>
@@ -118,7 +135,7 @@ export const api = {
 }
 
 export function mediaUrl(id: number): string {
-  return `/api/media/${id}`
+  return apiUrl(`/api/media/${id}`)
 }
 
 // Seconds -> "m:ss" (or "h:mm:ss" past an hour); used for timecodes and durations.
